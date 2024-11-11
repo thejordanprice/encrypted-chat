@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Encrypted Chat</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      height: 100vh;
+      background-color: #f4f4f4;
+    }
+    #chat-container {
+      display: flex;
+      width: 100%;
+    }
+    #sidebar {
+      width: 250px;
+      background-color: #2c3e50;
+      color: white;
+      padding: 15px;
+      box-sizing: border-box;
+      height: 100%;
+      overflow-y: auto;
+    }
+    #chat {
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+      background-color: white;
+      padding: 20px;
+      box-sizing: border-box;
+      height: 100%;
+      overflow-y: auto;
+    }
+    #chat-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    #chat-header h2 {
+      margin: 0;
+      font-size: 18px;
+    }
+    #user-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      margin-top: 20px;
+    }
+    #user-list li {
+      background-color: #34495e;
+      padding: 10px;
+      margin-bottom: 5px;
+      border-radius: 5px;
+    }
+    #chat-input-container {
+      display: flex;
+      margin-top: 10px;
+    }
+    #message {
+      flex-grow: 1;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      margin-right: 10px;
+    }
+    #send {
+      padding: 10px 20px;
+      background-color: #3498db;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    #send:hover {
+      background-color: #2980b9;
+    }
+    .message {
+      margin-bottom: 15px;
+      padding: 10px;
+      background-color: #ecf0f1;
+      border-radius: 5px;
+    }
+    .message span {
+      font-weight: bold;
+    }
+    .message.you {
+      background-color: #3498db;
+      color: white;
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+</head>
+<body>
+  <div id="chat-container">
+    <div id="sidebar">
+      <h2>Users</h2>
+      <ul id="user-list">
+      </ul>
+    </div>
+    <div id="chat">
+      <div id="chat-header">
+        <h2>Encrypted Chat</h2>
+      </div>
+      <div id="messages"></div>
+      <div id="chat-input-container">
+        <input type="text" id="message" placeholder="Type your message..." />
+        <button id="send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const socket = new WebSocket('ws://localhost:3000');
+
+    const username = prompt("Enter your username:");
+
+    let publicKey, privateKey;
+    window.crypto.subtle.generateKey(
+      {
+        name: "RSA-OAEP",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: "SHA-256"
+      },
+      true,
+      ["encrypt", "decrypt"]
+    ).then(keyPair => {
+      publicKey = keyPair.publicKey;
+      privateKey = keyPair.privateKey;
+
+      return window.crypto.subtle.exportKey("spki", publicKey);
+    }).then(exportedKey => {
+      const publicKeyBase64 = btoa(String.fromCharCode(...new Uint8Array(exportedKey)));
+      socket.send(JSON.stringify({ type: "publicKey", key: publicKeyBase64, username }));
+    }).catch(console.error);
+
+    const userPublicKeys = {};
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === "publicKey") {
+        userPublicKeys[data.userId] = data.key;
+      } else if (data.type === "message") {
+        const encryptedMessage = atob(data.encryptedMessage);
+        const encryptedArray = new Uint8Array([...encryptedMessage].map(char => char.charCodeAt(0)));
+
+        window.crypto.subtle.decrypt(
+          { name: "RSA-OAEP" },
+          privateKey,
+          encryptedArray
+        ).then(decryptedBuffer => {
+          const message = new TextDecoder().decode(decryptedBuffer);
+          displayMessage(`${data.username}: ${message}`, false);
+        }).catch(console.error);
+      } else if (data.type === "userList") {
+        updateUserList(data.users);
+      }
+    };
+
+    function displayMessage(message, isSender = true) {
+      const messageElement = document.createElement('div');
+      messageElement.classList.add('message');
+      if (isSender) {
+        messageElement.classList.add('you');
+      }
+      const messageText = document.createElement('span');
+      messageText.textContent = message;
+      messageElement.appendChild(messageText);
+      document.getElementById('messages').appendChild(messageElement);
+      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight; // Scroll to the bottom
+    }
+
+    function sendMessage() {
+      const message = document.getElementById('message').value;
+      if (!message.trim()) return;
+
+      const encoder = new TextEncoder();
+      const messageBuffer = encoder.encode(message);
+
+      displayMessage(`You: ${message}`, true);
+
+      Object.values(userPublicKeys).forEach(publicKeyBase64 => {
+        const publicKeyArray = Uint8Array.from(atob(publicKeyBase64), c => c.charCodeAt(0));
+        window.crypto.subtle.importKey(
+          "spki",
+          publicKeyArray.buffer,
+          { name: "RSA-OAEP", hash: "SHA-256" },
+          true,
+          ["encrypt"]
+        ).then(publicKey => {
+          return window.crypto.subtle.encrypt(
+            { name: "RSA-OAEP" },
+            publicKey,
+            messageBuffer
+          );
+        }).then(encryptedBuffer => {
+          const encryptedMessage = btoa(String.fromCharCode(...new Uint8Array(encryptedBuffer)));
+          socket.send(JSON.stringify({ type: "message", encryptedMessage, username }));
+        }).catch(console.error);
+      });
+
+      document.getElementById('message').value = '';
+    }
+
+    document.getElementById('send').onclick = sendMessage;
+
+    function updateUserList(users) {
+      const userListElement = document.getElementById('user-list');
+      userListElement.innerHTML = '';
+      users.forEach(user => {
+        const li = document.createElement('li');
+        li.textContent = user.username;
+        userListElement.appendChild(li);
+      });
+    }
+  </script>
+</body>
+</html>
